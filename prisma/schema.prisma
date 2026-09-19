@@ -1,0 +1,31 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Stage {
+  LEAD
+  QUALIFIED
+  PROPOSAL
+  NEGOTIATION
+  CLOSED_WON
+  CLOSED_LOST
+}
+
+model Deal {
+  id                 String   @id @default(cuid())
+  name               String
+  account            String
+  contactName        String?
+  value              Float
+  stage              Stage    @default(LEAD)
+  probability        Int      @default(10)
+  expectedCloseDate  DateTime
+  notes              String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
