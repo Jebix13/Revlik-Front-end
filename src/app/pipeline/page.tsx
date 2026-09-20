@@ -2,6 +2,8 @@ import NavBar from "@/components/NavBar";
 import PipelineBoard, { DealSummary } from "@/components/PipelineBoard";
 import { prisma } from "@/lib/prisma";
 
+export const dynamic = "force-dynamic";
+
 export default async function PipelinePage() {
   const deals = await prisma.deal.findMany({ orderBy: { expectedCloseDate: "asc" } });
 

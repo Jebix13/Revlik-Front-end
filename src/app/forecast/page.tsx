@@ -6,6 +6,8 @@ import { prisma } from "@/lib/prisma";
 import { StageKey, formatCurrency } from "@/lib/stages";
 import { computeSummary, computeMonthlyForecast, computeStageBreakdown } from "@/lib/forecast";
 
+export const dynamic = "force-dynamic";
+
 export default async function ForecastPage() {
   const dbDeals = await prisma.deal.findMany();
   const deals = dbDeals.map((d) => ({
