@@ -1,137 +1,188 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
-import { z } from "zod";
+import {
+  GoogleGenAI,
+  Type,
+  type Content,
+  type FunctionCall,
+  type FunctionDeclaration,
+} from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 import { STAGE_ORDER, StageKey } from "@/lib/stages";
 import * as dealActions from "@/lib/dealActions";
 
-const StageEnum = z.enum(STAGE_ORDER as unknown as [StageKey, ...StageKey[]]);
+const STAGE_VALUES = STAGE_ORDER as unknown as StageKey[];
+
+type ChatMessage = { role: "user" | "assistant"; content: string };
+
+const functionDeclarations: FunctionDeclaration[] = [
+  {
+    name: "list_deals",
+    description:
+      "List every deal in the pipeline with its id, name, account, value, stage, win probability, and expected close date. Always call this before updating or deleting a deal referred to by name, to find its id.",
+    parameters: { type: Type.OBJECT, properties: {} },
+  },
+  {
+    name: "update_deal",
+    description:
+      "Update one or more fields on an existing deal, looked up by id. Only pass the fields that should change. If you change the stage and don't specify a new probability, the stage's default win probability is applied automatically.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        id: { type: Type.STRING, description: "The deal's id, from list_deals" },
+        name: { type: Type.STRING },
+        account: { type: Type.STRING },
+        value: { type: Type.NUMBER },
+        stage: { type: Type.STRING, enum: STAGE_VALUES },
+        probability: { type: Type.NUMBER },
+        expectedCloseDate: { type: Type.STRING, description: "YYYY-MM-DD" },
+        notes: { type: Type.STRING },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "create_deal",
+    description: "Create a new deal in the pipeline.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        name: { type: Type.STRING },
+        account: { type: Type.STRING },
+        value: { type: Type.NUMBER },
+        stage: { type: Type.STRING, enum: STAGE_VALUES },
+        probability: { type: Type.NUMBER },
+        expectedCloseDate: { type: Type.STRING, description: "YYYY-MM-DD" },
+        notes: { type: Type.STRING },
+      },
+      required: ["name", "account", "value", "expectedCloseDate"],
+    },
+  },
+  {
+    name: "delete_deal",
+    description: "Permanently delete a deal from the pipeline, looked up by id.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: { id: { type: Type.STRING } },
+      required: ["id"],
+    },
+  },
+];
+
+const tools = [{ functionDeclarations }];
+
+async function runTool(name: string, args: Record<string, unknown>, markChanged: () => void) {
+  switch (name) {
+    case "list_deals":
+      return dealActions.listDeals();
+    case "update_deal":
+      try {
+        const deal = await dealActions.updateDeal(args as dealActions.UpdateDealInput);
+        markChanged();
+        return deal;
+      } catch {
+        return { error: `No deal found with id ${args.id}` };
+      }
+    case "create_deal": {
+      const deal = await dealActions.createDeal(args as dealActions.CreateDealInput);
+      markChanged();
+      return deal;
+    }
+    case "delete_deal":
+      try {
+        await dealActions.deleteDeal(args.id as string);
+        markChanged();
+        return { ok: true };
+      } catch {
+        return { error: `No deal found with id ${args.id}` };
+      }
+    default:
+      return { error: `Unknown tool ${name}` };
+  }
+}
 
 export async function POST(request: NextRequest) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
       {
         error:
-          "ANTHROPIC_API_KEY is not configured. Add your Anthropic API key to .env and restart the server.",
+          "GEMINI_API_KEY is not configured. Add your Gemini API key to .env and restart the server.",
       },
       { status: 500 }
     );
   }
 
   const body = await request.json().catch(() => null);
-  const history = Array.isArray(body?.messages) ? body.messages : null;
+  const history: ChatMessage[] | null = Array.isArray(body?.messages) ? body.messages : null;
   if (!history || history.length === 0) {
     return NextResponse.json({ error: "No message provided" }, { status: 400 });
   }
 
-  const client = new Anthropic({ apiKey });
+  const ai = new GoogleGenAI({ apiKey });
   let changed = false;
-
-  const listDeals = betaZodTool({
-    name: "list_deals",
-    description:
-      "List every deal in the pipeline with its id, name, account, value, stage, win probability, and expected close date. Always call this before updating or deleting a deal referred to by name, to find its id.",
-    inputSchema: z.object({}),
-    run: async () => JSON.stringify(await dealActions.listDeals()),
-  });
-
-  const updateDeal = betaZodTool({
-    name: "update_deal",
-    description:
-      "Update one or more fields on an existing deal, looked up by id. Only pass the fields that should change. If you change the stage and don't specify a new probability, the stage's default win probability is applied automatically.",
-    inputSchema: z.object({
-      id: z.string().describe("The deal's id, from list_deals"),
-      name: z.string().optional(),
-      account: z.string().optional(),
-      value: z.number().min(0).optional(),
-      stage: StageEnum.optional(),
-      probability: z.number().min(0).max(100).optional(),
-      expectedCloseDate: z.string().optional().describe("YYYY-MM-DD"),
-      notes: z.string().optional(),
-    }),
-    run: async (input) => {
-      try {
-        const deal = await dealActions.updateDeal(input);
-        changed = true;
-        return JSON.stringify(deal);
-      } catch {
-        return JSON.stringify({ error: `No deal found with id ${input.id}` });
-      }
-    },
-  });
-
-  const createDeal = betaZodTool({
-    name: "create_deal",
-    description: "Create a new deal in the pipeline.",
-    inputSchema: z.object({
-      name: z.string(),
-      account: z.string(),
-      value: z.number().min(0),
-      stage: StageEnum.optional(),
-      probability: z.number().min(0).max(100).optional(),
-      expectedCloseDate: z.string().describe("YYYY-MM-DD"),
-      notes: z.string().optional(),
-    }),
-    run: async (input) => {
-      const deal = await dealActions.createDeal(input);
-      changed = true;
-      return JSON.stringify(deal);
-    },
-  });
-
-  const deleteDeal = betaZodTool({
-    name: "delete_deal",
-    description: "Permanently delete a deal from the pipeline, looked up by id.",
-    inputSchema: z.object({ id: z.string() }),
-    run: async (input) => {
-      try {
-        await dealActions.deleteDeal(input.id);
-        changed = true;
-        return JSON.stringify({ ok: true });
-      } catch {
-        return JSON.stringify({ error: `No deal found with id ${input.id}` });
-      }
-    },
-  });
+  const markChanged = () => {
+    changed = true;
+  };
 
   const today = new Date().toISOString().slice(0, 10);
-
-  try {
-    const finalMessage = await client.beta.messages.toolRunner({
-      model: "claude-opus-5",
-      max_tokens: 4096,
-      system: `You are Revlik's pipeline assistant. You help a salesperson update their deals by name in plain language (e.g. "move Acme to negotiation", "bump Globex to $70k", "Umbrella closed lost").
+  const systemInstruction = `You are Revlik's pipeline assistant. You help a salesperson update their deals by name in plain language (e.g. "move Acme to negotiation", "bump Globex to $70k", "Umbrella closed lost").
 
 Today's date is ${today}. Deal stages, in order: Lead (10%), Qualified (25%), Proposal (50%), Negotiation (75%), Closed Won (100%), Closed Lost (0%).
 
-Always resolve a deal by name via list_deals first - never guess an id. If a name is ambiguous (matches multiple deals), ask which one they mean instead of guessing. After making a change, confirm briefly what changed in one or two sentences - don't restate the whole deal. If asked a question rather than for a change (e.g. "what's my biggest deal"), just answer using list_deals - don't make changes.`,
-      tools: [listDeals, updateDeal, createDeal, deleteDeal],
-      messages: history,
-    });
+Always resolve a deal by name via list_deals first - never guess an id. If a name is ambiguous (matches multiple deals), ask which one they mean instead of guessing. After making a change, confirm briefly what changed in one or two sentences - don't restate the whole deal. If asked a question rather than for a change (e.g. "what's my biggest deal"), just answer using list_deals - don't make changes.`;
 
-    const textBlock = finalMessage.content.find((b) => b.type === "text") as
-      | Anthropic.Beta.BetaTextBlock
-      | undefined;
-    const reply = textBlock?.text ?? "Done.";
+  const contents: Content[] = history.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }],
+  }));
+
+  try {
+    let reply = "Done.";
+
+    for (let turn = 0; turn < 8; turn++) {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.6-flash",
+        contents,
+        config: { systemInstruction, tools },
+      });
+
+      const parts = response.candidates?.[0]?.content?.parts ?? [];
+      const functionCalls = parts
+        .map((p) => p.functionCall)
+        .filter((c): c is FunctionCall => Boolean(c));
+
+      if (functionCalls.length === 0) {
+        reply = response.text ?? reply;
+        break;
+      }
+
+      contents.push({ role: "model", parts });
+
+      const responseParts = [];
+      for (const call of functionCalls) {
+        const result = await runTool(call.name ?? "", call.args ?? {}, markChanged);
+        responseParts.push({
+          functionResponse: { name: call.name ?? "", response: { result } },
+        });
+      }
+      contents.push({ role: "user", parts: responseParts });
+    }
 
     return NextResponse.json({ reply, changed });
   } catch (err) {
-    if (err instanceof Anthropic.AuthenticationError) {
+    const status = (err as { status?: number })?.status;
+    if (status === 401 || status === 403) {
       return NextResponse.json(
-        { error: "Invalid Anthropic API key. Check ANTHROPIC_API_KEY in .env." },
+        { error: "Invalid Gemini API key. Check GEMINI_API_KEY in .env." },
         { status: 500 }
       );
     }
-    if (err instanceof Anthropic.RateLimitError) {
+    if (status === 429) {
       return NextResponse.json(
-        { error: "Rate limited by the Anthropic API - try again shortly." },
+        { error: "Rate limited by the Gemini API - try again shortly." },
         { status: 500 }
       );
     }
-    if (err instanceof Anthropic.APIError) {
-      return NextResponse.json({ error: `Anthropic API error: ${err.message}` }, { status: 500 });
-    }
-    throw err;
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return NextResponse.json({ error: `Gemini API error: ${message}` }, { status: 500 });
   }
 }
