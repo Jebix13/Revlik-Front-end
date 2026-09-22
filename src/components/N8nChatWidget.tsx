@@ -22,6 +22,7 @@ export default function N8nChatWidget() {
           footer: "",
           getStarted: "New conversation",
           inputPlaceholder: "Type your question…",
+          closeButtonTooltip: "Close",
         },
       },
     });
