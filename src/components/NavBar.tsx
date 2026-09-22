@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import ChatWidget from "@/components/ChatWidget";
+import N8nChatWidget from "@/components/N8nChatWidget";
 
 const LINKS = [
   { href: "/pipeline", label: "Pipeline" },
@@ -61,6 +62,7 @@ export default function NavBar() {
         </div>
       </div>
       <ChatWidget />
+      <N8nChatWidget />
     </header>
   );
 }
